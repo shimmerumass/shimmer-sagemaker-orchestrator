@@ -12,16 +12,12 @@ from .event_processor import (
     remove_outliers_mad,
     extract_features,
     attach_predictions,
-    count_touches
+    count_touches_by_hand,
+    event_log_finalized
 )
 
-# Initialize S3 client once (safe even if not used)
 s3 = boto3.client("s3")
 
-
-# ------------------------------
-# Helpers
-# ------------------------------
 def load_json_from_s3(s3_uri):
     """Load JSON data from S3 URI."""
     parts = s3_uri.replace("s3://", "").split("/", 1)
@@ -29,10 +25,6 @@ def load_json_from_s3(s3_uri):
     response = s3.get_object(Bucket=bucket, Key=key)
     return json.loads(response["Body"].read())
 
-
-# ------------------------------
-# SageMaker entry points
-# ------------------------------
 def model_fn(model_dir):
     """Load trained model from SageMaker model directory."""
     try:
@@ -44,7 +36,6 @@ def model_fn(model_dir):
     except Exception as e:
         print("[ERROR] model_fn failed:", traceback.format_exc())
         raise e
-
 
 def input_fn(request_body, content_type):
     """Parse and validate input request."""
@@ -63,16 +54,13 @@ def input_fn(request_body, content_type):
         print("[ERROR] input_fn failed:", traceback.format_exc())
         raise e
 
-
 def predict_fn(inputs, model):
-    """Run the model on processed input data."""
+    """Run the full event processing and prediction pipeline."""
     try:
         print("[INFO] predict_fn triggered.")
         Fs = inputs["leftSensorData"]["sampleRate"]
-
-        # --- LEFT HAND ---
+        # LEFT HAND
         left = group_uwb_events_by_time(inputs["leftSensorData"], Fs)
-        print(f"[DEBUG] Left grouped events: {len(left)}")
         left = filter_by_dominant_tag(left)
         left = filter_noisy_events(left)
         left = filter_consecutive(left)
@@ -80,10 +68,8 @@ def predict_fn(inputs, model):
         X_left = extract_features(left, Fs)
         left_preds = model.predict(X_left) if not X_left.empty else []
         left = attach_predictions(left, left_preds)
-
-        # --- RIGHT HAND ---
+        # RIGHT HAND
         right = group_uwb_events_by_time(inputs["rightSensorData"], Fs)
-        print(f"[DEBUG] Right grouped events: {len(right)}")
         right = filter_by_dominant_tag(right)
         right = filter_noisy_events(right)
         right = filter_consecutive(right)
@@ -91,17 +77,22 @@ def predict_fn(inputs, model):
         X_right = extract_features(right, Fs)
         right_preds = model.predict(X_right) if not X_right.empty else []
         right = attach_predictions(right, right_preds)
-
-        # --- COMBINE RESULTS ---
-        counts = count_touches(left, right)
-        result = {"counts": counts, "leftEvents": left, "rightEvents": right}
+        # Event log and counts
+        counts, event_log = count_touches_by_hand(left, right)
+        finalized_log, final_counts = event_log_finalized(event_log)
+        result = {
+            "counts": counts,
+            "finalCounts": final_counts,
+            "leftEvents": left,
+            "rightEvents": right,
+            "eventLog": event_log,
+            "finalizedLog": finalized_log
+        }
         print("[INFO] Prediction completed successfully.")
         return result
-
     except Exception as e:
         print("[ERROR] predict_fn failed:", traceback.format_exc())
         raise e
-
 
 def output_fn(prediction, accept):
     """Format model output as JSON."""

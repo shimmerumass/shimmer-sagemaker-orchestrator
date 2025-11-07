@@ -1,2 +1,4 @@
 *.json
 code/__pycache__/*
+*.gz
+*.mat
